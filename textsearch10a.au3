@@ -1,0 +1,226 @@
+#include <GUIConstantsEx.au3>
+#include <WindowsConstants.au3>
+#include <ListViewConstants.au3>
+#include <FileConstants.au3>
+#include <GuiListView.au3>
+#include <MsgBoxConstants.au3>
+#include <Array.au3>
+#include <File.au3>
+
+Global $g_bSearching = False
+Global $g_hFile = -1
+Global $g_iLine = 0
+Global $g_sTerm = ""
+Global $g_sFile = ""
+Global $g_sCurrentDir = ""
+Global $g_aResults[0][3] ; [filename][directory][line number]
+
+; -----------------------------
+; GUI SETUP
+; -----------------------------
+$hGUI = GUICreate("DIR Search Tool", 950, 650, -1, -1, _
+    BitOR($WS_SIZEBOX, $WS_MAXIMIZEBOX, $WS_MINIMIZEBOX))
+
+GUICtrlCreateLabel("DIR Output File:", 10, 10, 120, 20)
+$inpFile = GUICtrlCreateInput("", 130, 8, 600, 22)
+$btnBrowse = GUICtrlCreateButton("Browse", 740, 8, 80, 22)
+$btnIndex = GUICtrlCreateButton("Index Folder", 830, 8, 100, 22)
+
+GUICtrlCreateLabel("Search Term:", 10, 40, 100, 20)
+$inpSearch = GUICtrlCreateInput("", 110, 38, 300, 22)
+
+$btnSearch = GUICtrlCreateButton("Search", 420, 38, 120, 22)
+GUICtrlSetBkColor($btnSearch, 0x00AA00) ; green
+
+$lblStatus = GUICtrlCreateLabel("Status: Idle", 10, 70, 400, 20)
+
+$lvResults = GUICtrlCreateListView("File Name|Directory|Line", 10, 100, 930, 530, _
+    BitOR($LVS_REPORT, $LVS_SHOWSELALWAYS))
+_GUICtrlListView_SetColumnWidth($lvResults, 0, 200)
+_GUICtrlListView_SetColumnWidth($lvResults, 1, 600)
+_GUICtrlListView_SetColumnWidth($lvResults, 2, 80)
+
+GUISetState(@SW_SHOW)
+
+; -----------------------------
+; MAIN LOOP
+; -----------------------------
+While True
+    Local $msg = GUIGetMsg()
+
+    Switch $msg
+        Case $GUI_EVENT_CLOSE
+            Exit
+
+        Case $btnBrowse
+            Local $sFile = FileOpenDialog("Select DIR Output File", @ScriptDir, _
+                "Text Files (*.txt)|All (*.*)", 1)
+            If Not @error Then GUICtrlSetData($inpFile, $sFile)
+
+        Case $btnIndex
+            _IndexFolder()
+
+        Case $btnSearch
+            If Not $g_bSearching Then
+                _StartSearch()
+            Else
+                $g_bSearching = False ; stop immediately
+            EndIf
+
+        Case $lvResults
+            _HandleListClick()
+    EndSwitch
+WEnd
+
+
+; -----------------------------
+; INDEX FOLDER
+; -----------------------------
+Func _IndexFolder()
+    Local $folder = FileSelectFolder("Select folder to index", "")
+    If @error Or $folder = "" Then Return
+
+    Local $outfile = $folder & "\index.txt"
+
+    ; Run DIR /S and wait for completion
+    RunWait(@ComSpec & " /c dir /s * > """ & $outfile & """", $folder, @SW_HIDE)
+
+    GUICtrlSetData($inpFile, $outfile)
+    MsgBox(64, "Index Complete", "Index file created:" & @CRLF & $outfile)
+EndFunc
+
+
+; -----------------------------
+; START SEARCH
+; -----------------------------
+Func _StartSearch()
+    $g_sFile = GUICtrlRead($inpFile)
+    $g_sTerm = GUICtrlRead($inpSearch)
+
+    If Not FileExists($g_sFile) Then
+        MsgBox(16, "Error", "File does not exist.")
+        Return
+    EndIf
+
+    If $g_sTerm = "" Then
+        MsgBox(16, "Error", "Enter a search term.")
+        Return
+    EndIf
+
+    ; Reset UI
+    GUICtrlSetData($lblStatus, "Status: Searching...")
+    GUICtrlSetData($btnSearch, "Stop")
+    GUICtrlSetBkColor($btnSearch, 0xAA0000) ; red
+
+    GUICtrlDelete($lvResults)
+    $lvResults = GUICtrlCreateListView("File Name|Directory|Line", 10, 100, 930, 530, _
+        BitOR($LVS_REPORT, $LVS_SHOWSELALWAYS))
+    _GUICtrlListView_SetColumnWidth($lvResults, 0, 200)
+    _GUICtrlListView_SetColumnWidth($lvResults, 1, 600)
+    _GUICtrlListView_SetColumnWidth($lvResults, 2, 80)
+
+    ReDim $g_aResults[0][3]
+    $g_bSearching = True
+    $g_iLine = 0
+    $g_sCurrentDir = ""
+
+    $g_hFile = FileOpen($g_sFile, $FO_READ)
+    If $g_hFile = -1 Then
+        MsgBox(16, "Error", "Unable to open file.")
+        Return
+    EndIf
+
+    _SearchWorker()
+EndFunc
+
+
+; -----------------------------
+; SEARCH WORKER (polling loop)
+; -----------------------------
+Func _SearchWorker()
+    While $g_bSearching
+
+        For $i = 1 To 4000
+
+            If Not $g_bSearching Then ExitLoop 2
+
+            Local $sLine = FileReadLine($g_hFile)
+            If @error Then
+                $g_bSearching = False
+                ExitLoop 2
+            EndIf
+
+            $g_iLine += 1
+
+            If Mod($g_iLine, 100) = 0 Then
+                GUICtrlSetData($lblStatus, "Scanning line: " & $g_iLine)
+            EndIf
+
+            ; Detect directory header
+            If StringInStr($sLine, " Directory of ") Then
+                $g_sCurrentDir = StringTrimLeft($sLine, StringInStr($sLine, "Directory of ") + 12)
+                ContinueLoop
+            EndIf
+
+            ; Detect file line
+            If StringRegExp($sLine, "^\d{2}/\d{2}/\d{4}") Then
+                Local $aParts = StringSplit(StringStripWS($sLine, 3), " ")
+                Local $sFileName = $aParts[$aParts[0]]
+
+                ; If no search term ? include ALL files
+		If ($g_sTerm = "") Or (StringInStr($sFileName, $g_sTerm, 0) > 0) Then
+                    Local $idx = UBound($g_aResults)
+                    ReDim $g_aResults[$idx + 1][3]
+                    $g_aResults[$idx][0] = $sFileName
+                    $g_aResults[$idx][1] = $g_sCurrentDir
+                    $g_aResults[$idx][2] = $g_iLine
+
+                    GUICtrlCreateListViewItem($sFileName & "|" & $g_sCurrentDir & "|" & $g_iLine, $lvResults)
+                EndIf
+            EndIf
+
+        Next
+
+        Sleep(1) ; allow GUI to process events
+    WEnd
+
+    _EndSearch()
+EndFunc
+
+
+; -----------------------------
+; HANDLE LIST CLICK
+; -----------------------------
+Func _HandleListClick()
+    Local $iIndex = _GUICtrlListView_GetNextItem($lvResults)
+    If $iIndex < 0 Then Return
+
+    Local $sFile = $g_aResults[$iIndex][0]
+    Local $sDir  = $g_aResults[$iIndex][1]
+
+    Local $state = GUIGetCursorInfo($hGUI)
+
+    ; Right-click ? open directory
+    If $state[2] = 2 Then
+        ShellExecute($sDir)
+        Return
+    EndIf
+
+    ; Double-click ? open file
+    If $state[2] = 1 And $state[4] = 2 Then
+        ShellExecute($sDir & "\" & $sFile)
+        Return
+    EndIf
+EndFunc
+
+
+; -----------------------------
+; END SEARCH
+; -----------------------------
+Func _EndSearch()
+    FileClose($g_hFile)
+
+    GUICtrlSetData($lblStatus, "Status: Done")
+    GUICtrlSetData($btnSearch, "Search")
+    GUICtrlSetBkColor($btnSearch, 0x00AA00) ; green
+EndFunc
